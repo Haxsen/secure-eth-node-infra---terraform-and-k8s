@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - cluster-config # Terraform outputs; must precede the component below
+
+components:
+  - ../../components/aws-wiring
+
+configMapGenerator:
+  - name: eth-network
+    namespace: eth-nodes
+    behavior: merge
+    literals:
+      - ETH_NETWORK=mainnet
+      - CHECKPOINT_SYNC_URL=https://mainnet.checkpoint.sigp.io
+
+  - name: validator-config
+    namespace: eth-validator
+    behavior: merge
+    literals:
+      - ETH_NETWORK=mainnet
+      # CHANGE ME before deploying. Policy rejects the zero address.
+      - FEE_RECIPIENT=0x2222222222222222222222222222222222222222
+      - BEACON_NODES=http://eth-node-0.eth-node-headless.eth-nodes.svc.cluster.local:5052,http://eth-node-1.eth-node-headless.eth-nodes.svc.cluster.local:5052,http://eth-node-2.eth-node-headless.eth-nodes.svc.cluster.local:5052
+
+patches:
+  - path: secret-provider-classes.yaml
+  - path: eth-node-sizing.yaml
+  - target:
+      kind: StatefulSet
+      name: eth-node
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 2Ti
+      - op: replace
+        path: /spec/volumeClaimTemplates/1/spec/resources/requests/storage
+        value: 300Gi
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: eth-node
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 6

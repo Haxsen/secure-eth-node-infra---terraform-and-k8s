@@ -1,0 +1,14 @@
+# Terraform outputs for this environment, rendered by
+#   scripts/sync-tf-outputs.sh <env>
+# Marked local-config: a replacement source only, never applied to the cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: cluster-config
+    envs:
+      - cluster-config.env
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"

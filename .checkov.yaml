@@ -1,0 +1,10 @@
+# Repo-wide Checkov configuration. Every suppression carries a reason;
+# resource-specific suppressions live inline next to the resource.
+compact: true
+quiet: true
+skip-download: true
+skip-check:
+  # CPU limits trigger CFS throttling, which delays block processing and
+  # attestation duties. Memory limits ARE required (enforced by
+  # policies/kubernetes/security.rego) to bound the blast radius.
+  - CKV_K8S_11

@@ -1,0 +1,7 @@
+# terraform init -backend-config=envs/hoodi.s3.tfbackend
+bucket       = "CHANGE-ME-eth-platform-tfstate"
+key          = "platform/hoodi.tfstate"
+region       = "eu-west-1"
+encrypt      = true
+kms_key_id   = "CHANGE-ME-state-kms-key-arn"
+use_lockfile = true

@@ -1,0 +1,120 @@
+# Shared AWS wiring for every overlay: inject Terraform outputs (the
+# cluster-config ConfigMap, local-config only) into the manifests that need
+# AWS identifiers. Overlays must list ./cluster-config under `resources` so
+# the ConfigMap exists before this component runs.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+replacements:
+  # --- IRSA roles -----------------------------------------------------------------
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.ETH_NODE_ROLE_ARN
+    targets:
+      - select:
+          kind: ServiceAccount
+          name: eth-node
+        fieldPaths:
+          - metadata.annotations.[eks.amazonaws.com/role-arn]
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.VALIDATOR_ROLE_ARN
+    targets:
+      - select:
+          kind: ServiceAccount
+          name: validator
+        fieldPaths:
+          - metadata.annotations.[eks.amazonaws.com/role-arn]
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.RPC_GATEWAY_ROLE_ARN
+    targets:
+      - select:
+          kind: ServiceAccount
+          name: rpc-gateway
+        fieldPaths:
+          - metadata.annotations.[eks.amazonaws.com/role-arn]
+
+  # --- Secrets Manager region ----------------------------------------------------
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.AWS_REGION
+    targets:
+      - select:
+          kind: SecretProviderClass
+        fieldPaths:
+          - spec.parameters.region
+
+  # --- Public edge ------------------------------------------------------------------
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.WAF_WEB_ACL_ARN
+    targets:
+      - select:
+          kind: Ingress
+          name: rpc-gateway
+        fieldPaths:
+          - metadata.annotations.[alb.ingress.kubernetes.io/wafv2-acl-arn]
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.ACM_CERTIFICATE_ARN
+    targets:
+      - select:
+          kind: Ingress
+          name: rpc-gateway
+        fieldPaths:
+          - metadata.annotations.[alb.ingress.kubernetes.io/certificate-arn]
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.RPC_HOSTNAME
+    targets:
+      - select:
+          kind: Ingress
+          name: rpc-gateway
+        fieldPaths:
+          - spec.rules.0.host
+
+  # --- Only ALB subnets may reach the gateway --------------------------------------
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PUBLIC_SUBNET_CIDR_A
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: rpc-gateway-ingress-from-alb
+        fieldPaths:
+          - spec.ingress.0.from.0.ipBlock.cidr
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PUBLIC_SUBNET_CIDR_B
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: rpc-gateway-ingress-from-alb
+        fieldPaths:
+          - spec.ingress.0.from.1.ipBlock.cidr
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PUBLIC_SUBNET_CIDR_C
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: rpc-gateway-ingress-from-alb
+        fieldPaths:
+          - spec.ingress.0.from.2.ipBlock.cidr

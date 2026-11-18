@@ -1,0 +1,73 @@
+# eth-validator namespace: the tightest policy in the cluster.
+#   egress   53   -> CoreDNS
+#   egress   5052 -> eth-node beacon API
+#   ingress  5064 <- monitoring ns (metrics)
+# No internet egress at all: even with code execution in the validator, keys
+# cannot be exfiltrated over the network except through the beacon node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: validator-egress-beacon-api-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: validator
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: eth-nodes
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: eth-node
+      ports:
+        - protocol: TCP
+          port: 5052
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: validator-ingress-metrics
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: validator
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 5064

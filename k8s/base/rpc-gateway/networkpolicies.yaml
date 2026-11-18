@@ -1,0 +1,76 @@
+# rpc-gateway namespace:
+#   ingress  8080 <- ALB nodes only (public subnet CIDRs, set per overlay)
+#   egress   53   -> CoreDNS
+#   egress   8545 -> eth-node JSON-RPC
+# A compromised gateway cannot reach the beacon API, the validator, the
+# Kubernetes API, IMDS or the internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rpc-gateway-ingress-from-alb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rpc-gateway
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.255.255.0/24 # replaced per overlay: public subnet A
+        - ipBlock:
+            cidr: 10.255.255.0/24 # replaced per overlay: public subnet B
+        - ipBlock:
+            cidr: 10.255.255.0/24 # replaced per overlay: public subnet C
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rpc-gateway-egress-to-nodes
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rpc-gateway
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: eth-nodes
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: eth-node
+      ports:
+        - protocol: TCP
+          port: 8545

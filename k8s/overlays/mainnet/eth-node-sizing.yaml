@@ -1,0 +1,24 @@
+# Mainnet sizing for r7i.2xlarge edge nodes (8 vCPU / 64 GiB), one pair per node.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: eth-node
+  namespace: eth-nodes
+spec:
+  template:
+    spec:
+      containers:
+        - name: geth
+          resources:
+            requests:
+              cpu: "4"
+              memory: 24Gi
+            limits:
+              memory: 32Gi
+        - name: lighthouse
+          resources:
+            requests:
+              cpu: "2"
+              memory: 10Gi
+            limits:
+              memory: 16Gi

@@ -1,0 +1,16 @@
+title = "eth-platform gitleaks config"
+
+[extend]
+useDefault = true
+
+# Test-only fixtures: the public BIP-39 test vector mnemonic and throwaway
+# passwords/API keys generated inside tests/*/run.sh. Nothing here secures
+# real funds or infrastructure.
+[[allowlists]]
+description = "Throwaway test fixtures"
+paths = ['''tests/.*/run\.sh''']
+
+# Placeholder account IDs / ARNs used in overlay examples.
+[[allowlists]]
+description = "Example account IDs"
+regexes = ['''(111111111111|222222222222)''']

@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rpc-gateway
+  labels:
+    app.kubernetes.io/name: rpc-gateway
+    app.kubernetes.io/component: api-gateway
+spec:
+  # replicas intentionally omitted: owned by the HorizontalPodAutoscaler.
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rpc-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rpc-gateway
+        app.kubernetes.io/component: api-gateway
+      annotations:
+        # Secrets are fetched by the CSI driver, not by the gateway process.
+        eks.amazonaws.com/skip-containers: openresty
+    spec:
+      serviceAccountName: rpc-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Same trust zone as the P2P clients: everything internet-facing shares
+      # the edge node group; system controllers and the validator never do.
+      nodeSelector:
+        trust-zone: edge
+      tolerations:
+        - key: trust-zone
+          operator: Equal
+          value: edge
+          effect: NoSchedule
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: rpc-gateway
+      containers:
+        - name: openresty
+          image: openresty/openresty:1.31.8.1-alpine@sha256:720b9e5d188afc7736a64d16f676ff357665a5f4b8f01ab28c6b72df5f9b78b2
+          command: ["/usr/local/openresty/bin/openresty"]
+          args: ["-p", "/tmp/", "-c", "/etc/openresty/nginx.conf", "-e", "stderr", "-g", "daemon off;"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          lifecycle:
+            # Let the ALB deregister the target before nginx stops accepting.
+            preStop:
+              sleep:
+                seconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openresty
+              readOnly: true
+            - name: api-keys
+              mountPath: /secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: rpc-gateway-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+              - key: rpc_guard.lua
+                path: lua/rpc_guard.lua
+        - name: api-keys
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: rpc-gateway-api-keys
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi

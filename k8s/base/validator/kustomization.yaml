@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: eth-validator
+
+resources:
+  - serviceaccount.yaml
+  - secretproviderclass.yaml
+  - statefulset.yaml
+  - service.yaml
+  - networkpolicies.yaml
+
+configMapGenerator:
+  - name: validator-config
+    literals:
+      - ETH_NETWORK=set-in-overlay
+      - FEE_RECIPIENT=0x0000000000000000000000000000000000000000
+      # Comma-separated, in failover order. Pod DNS via the headless Service.
+      - BEACON_NODES=http://eth-node-0.eth-node-headless.eth-nodes.svc.cluster.local:5052,http://eth-node-1.eth-node-headless.eth-nodes.svc.cluster.local:5052
+      # Only "true" for the very first start of a brand-new validator set.
+      # See docs/runbook.md - leaving this on can mask a lost slashing DB.
+      - INIT_SLASHING_PROTECTION=false
+  - name: validator-scripts
+    files:
+      - scripts/prepare-keys.sh
+      - scripts/start-validator.sh

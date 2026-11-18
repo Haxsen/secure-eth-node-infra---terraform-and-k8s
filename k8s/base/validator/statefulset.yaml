@@ -1,0 +1,200 @@
+# Lighthouse validator client - the only workload that can sign.
+#
+# Anti-slashing design:
+#   * StatefulSet with replicas: 1, never a Deployment. A Deployment rolling
+#     update surges a second pod while the first is still running = two
+#     signers with the same keys = slashable double vote. A StatefulSet
+#     terminates the old pod before creating the new one.
+#   * Doppelganger protection: refuses to sign for ~2 epochs if the same keys
+#     are seen live on the network.
+#   * Slashing-protection DB on a Retain-policy encrypted PVC.
+#   * NEVER `kubectl delete pod --force` this pod (see docs/runbook.md).
+#
+# Key-exposure design:
+#   * Runs alone on the "signing" node group: never shares a kernel with
+#     internet-facing P2P or RPC workloads.
+#   * Keys come from Secrets Manager via CSI (tmpfs). Keystores and plaintext
+#     keys never reach the PVC; the only key-derived file there is
+#     Lighthouse's scrypt-encrypted key cache (tests/validator asserts this).
+#     The pod gets no AWS credentials of its own.
+#   * Egress is limited to the beacon API. It cannot reach the internet.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: validator
+  labels:
+    app.kubernetes.io/name: validator
+    app.kubernetes.io/component: validator-client
+spec:
+  serviceName: validator
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: validator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: validator
+        app.kubernetes.io/component: validator-client
+      annotations:
+        kubectl.kubernetes.io/default-container: validator
+        # IRSA is used only by the CSI driver to fetch the keys. Stop the EKS
+        # pod-identity webhook from also injecting AWS web-identity tokens
+        # into the containers, so a compromised validator process holds no
+        # AWS credentials it could use to read secrets again.
+        eks.amazonaws.com/skip-containers: prepare-keys,validator
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: validator
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        trust-zone: signing
+      tolerations:
+        - key: trust-zone
+          operator: Equal
+          value: signing
+          effect: NoSchedule
+
+      initContainers:
+        - name: prepare-keys
+          image: sigp/lighthouse:v8.3.3@sha256:fc97c58322f3b159724a8c3546e2b5275204ab018c23dfb52559356437caa31c
+          command: ["/bin/bash", "/scripts/prepare-keys.sh"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: keys
+              mountPath: /keys
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      containers:
+        - name: validator
+          image: sigp/lighthouse:v8.3.3@sha256:fc97c58322f3b159724a8c3546e2b5275204ab018c23dfb52559356437caa31c
+          command: ["/bin/bash", "/scripts/start-validator.sh"]
+          args:
+            - validator_client
+            - --network=$(ETH_NETWORK)
+            - --datadir=/data
+            - --beacon-nodes=$(BEACON_NODES)
+            - --suggested-fee-recipient=$(FEE_RECIPIENT)
+            - --enable-doppelganger-protection
+            # Load only what prepare-keys.sh rendered; never pick up stray files.
+            - --disable-auto-discover
+            # stdout only; no log files accumulating on the PVC.
+            - --logfile-max-number=0
+            - --metrics
+            - --metrics-address=0.0.0.0
+            - --metrics-port=5064
+          envFrom:
+            - configMapRef:
+                name: validator-config
+          env:
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: metrics
+              containerPort: 5064
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command: ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5064"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5064"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # Writable on purpose: Lighthouse places a <keystore>.lock next to
+            # each keystore to stop two processes signing with the same key.
+            # The volume is pod-private tmpfs; tests/validator proves the
+            # client fails to start if this is mounted read-only.
+            - name: keys
+              mountPath: /keys
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: validator-keys
+        # Keystores live only in RAM (tmpfs) and vanish with the pod.
+        - name: keys
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: scripts
+          configMap:
+            name: validator-scripts
+            defaultMode: 0555
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: eth-gp3-retain
+        resources:
+          requests:
+            storage: 10Gi

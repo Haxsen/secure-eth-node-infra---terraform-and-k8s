@@ -1,0 +1,71 @@
+name: terraform-plan
+
+# Manual, per-environment plan with policy gate. Authenticates to AWS with
+# GitHub OIDC (no long-lived access keys anywhere). Configure a GitHub
+# Environment per Ethereum environment with:
+#   vars.AWS_PLAN_ROLE_ARN  read-only plan role trusting this repo's OIDC subject
+#   vars.AWS_REGION
+# and protection rules (required reviewers) on "mainnet".
+#
+# Note: once the cluster exists its API endpoint is private, so plans that
+# refresh Helm/Kubernetes resources must run on a runner inside the VPC
+# (self-hosted or CodeBuild) or from an allow-listed CIDR.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to plan
+        type: choice
+        options: [hoodi, mainnet]
+        default: hoodi
+
+permissions: {}
+
+concurrency:
+  group: terraform-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: 1.17.2
+  CONFTEST_IMAGE: openpolicyagent/conftest:v0.71.1@sha256:0e77cdf7c1fcde035f3c579e4aaa6664ee2a8be5777eaa9af9f520cdd02280c0
+
+jobs:
+  plan:
+    name: Plan ${{ inputs.environment }} + policy gate
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write # OIDC federation to AWS
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+          role-duration-seconds: 1800
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform plan
+        working-directory: terraform/platform
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          terraform init -input=false -backend-config="envs/${ENVIRONMENT}.s3.tfbackend"
+          terraform plan -input=false -lock-timeout=5m \
+            -var-file="envs/${ENVIRONMENT}.tfvars" -out=plan.out
+          terraform show -json plan.out > plan.json
+      - name: Policy gate (OPA) on the plan
+        run: |
+          docker run --rm -v "$PWD:/project" -w /project "$CONFTEST_IMAGE" \
+            test --namespace terraform.security --policy policies/terraform terraform/platform/plan.json
+      # The plan is intentionally NOT uploaded as an artifact: plan files can
+      # contain sensitive values and anyone with read access could download it.

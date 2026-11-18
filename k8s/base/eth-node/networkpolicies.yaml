@@ -1,0 +1,99 @@
+# eth-nodes namespace: default deny, then allow exactly:
+#   ingress  8545 <- rpc-gateway pods        (JSON-RPC)
+#   ingress  5052 <- validator pod           (beacon API)
+#   ingress  6060/5054 <- monitoring ns      (metrics)
+#   egress   53   -> CoreDNS
+#   egress   any  -> public internet only    (devp2p / libp2p / checkpoint sync)
+#
+# P2P peers listen on arbitrary ports, so egress cannot be port-restricted.
+# The control that matters is denying every private / link-local range, so a
+# compromised client cannot pivot into the VPC, other pods, or IMDS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eth-node-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eth-node
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: rpc-gateway
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rpc-gateway
+      ports:
+        - protocol: TCP
+          port: 8545
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: eth-validator
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: validator
+      ports:
+        - protocol: TCP
+          port: 5052
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 6060
+        - protocol: TCP
+          port: 5054
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eth-node-egress-public-internet-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eth-node
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8

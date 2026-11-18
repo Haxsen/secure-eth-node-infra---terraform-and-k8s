@@ -1,0 +1,35 @@
+# The ONLY public entry point in the cluster. Provisioned by the AWS Load
+# Balancer Controller as an internet-facing ALB:
+#   - HTTPS only (no :80 listener at all), TLS 1.2+/1.3 policy
+#   - WAFv2 web ACL attached (IP reputation, bad inputs, per-IP rate limit)
+#   - Invalid headers dropped, strictest HTTP desync mitigation (request smuggling)
+#   - IP targets: the ALB talks straight to gateway pods, bypassing NodePorts
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rpc-gateway
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: set-in-overlay
+    alb.ingress.kubernetes.io/wafv2-acl-arn: set-in-overlay
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/load-balancer-attributes: >-
+      routing.http.drop_invalid_header_fields.enabled=true,routing.http.desync_mitigation_mode=strictest,idle_timeout.timeout_seconds=60,deletion_protection.enabled=true
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+spec:
+  ingressClassName: alb
+  rules:
+    - host: set-in-overlay
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rpc-gateway
+                port:
+                  name: http

@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - cluster-config # Terraform outputs; must precede the component below
+
+components:
+  - ../../components/aws-wiring
+
+configMapGenerator:
+  - name: eth-network
+    namespace: eth-nodes
+    behavior: merge
+    literals:
+      - ETH_NETWORK=hoodi
+      - CHECKPOINT_SYNC_URL=https://checkpoint-sync.hoodi.ethpandaops.io
+
+  - name: validator-config
+    namespace: eth-validator
+    behavior: merge
+    literals:
+      - ETH_NETWORK=hoodi
+      # CHANGE ME: an address you control. Policy rejects the zero address.
+      - FEE_RECIPIENT=0x1111111111111111111111111111111111111111
+
+patches:
+  - path: secret-provider-classes.yaml

@@ -1,0 +1,36 @@
+# --- Terraform ---------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+plan.out
+plan.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# --- Never commit key material -------------------------------------------------
+validator_keys/
+**/keystore-*.json
+!tests/**/keystore-*.json
+*.mnemonic
+mnemonic*.txt
+deposit_data-*.json
+*.pem
+*.key
+.env
+.env.*
+
+# --- Local tooling / test artifacts ------------------------------------------
+tests/**/.work/
+rendered/
+checkov.sarif
+.cache/
+
+# --- Private notes ---------------------------------------------------------------
+.notes/

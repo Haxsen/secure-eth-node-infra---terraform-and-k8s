@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
+  ],
+  "labels": ["dependencies"],
+  "minimumReleaseAge": "7 days",
+  "kubernetes": {
+    "managerFilePatterns": ["/k8s/.+\\.ya?ml$/"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Tool images pinned in workflow env vars",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "_IMAGE: (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Helm charts installed by Terraform",
+      "managerFilePatterns": ["/^terraform/.+\\.tf$/"],
+      "matchStrings": [
+        "repository\\s*=\\s*\"(?<registryUrl>[^\"]+)\"\\s*\\n\\s*chart\\s*=\\s*\"(?<depName>[^\"]+)\"\\s*\\n\\s*version\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "helm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Consensus/execution clients: never automerge; read release notes for hard forks",
+      "matchPackageNames": ["ethereum/client-go", "sigp/lighthouse"],
+      "automerge": false,
+      "labels": ["dependencies", "eth-client", "needs-release-notes-review"]
+    },
+    {
+      "description": "Group pinned GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    }
+  ]
+}

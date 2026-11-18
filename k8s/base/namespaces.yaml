@@ -1,0 +1,35 @@
+# One namespace per trust boundary. Pod Security Admission "restricted" is
+# enforced everywhere: no root, no privilege escalation, no host namespaces,
+# seccomp required, all capabilities dropped.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eth-nodes
+  labels:
+    trust-zone: edge
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpc-gateway
+  labels:
+    trust-zone: edge
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eth-validator
+  labels:
+    trust-zone: signing
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

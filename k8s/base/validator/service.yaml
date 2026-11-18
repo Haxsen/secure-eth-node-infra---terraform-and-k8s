@@ -1,0 +1,16 @@
+# Governing headless Service for the StatefulSet. Metrics only; the validator
+# exposes no API (keymanager HTTP API is intentionally disabled).
+apiVersion: v1
+kind: Service
+metadata:
+  name: validator
+  labels:
+    app.kubernetes.io/name: validator
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: validator
+  ports:
+    - name: metrics
+      port: 5064
+      targetPort: metrics

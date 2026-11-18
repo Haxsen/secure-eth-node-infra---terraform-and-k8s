@@ -1,0 +1,33 @@
+# Headless: stable per-pod DNS (eth-node-0.eth-node-headless...) so the
+# validator can list multiple beacon nodes for failover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eth-node-headless
+  labels:
+    app.kubernetes.io/name: eth-node
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: eth-node
+  ports:
+    - name: beacon-api
+      port: 5052
+      targetPort: beacon-api
+---
+# Internal JSON-RPC pool, consumed only by the rpc-gateway. ClusterIP only:
+# nothing in this namespace is ever exposed directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eth-node-rpc
+  labels:
+    app.kubernetes.io/name: eth-node
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: eth-node
+  ports:
+    - name: http-rpc
+      port: 8545
+      targetPort: http-rpc

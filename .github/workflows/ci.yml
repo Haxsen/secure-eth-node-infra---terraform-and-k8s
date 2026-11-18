@@ -1,0 +1,231 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: nothing by default, each job opts in to what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Supply chain: every action is pinned to a commit SHA, every tool image to a
+# digest. Renovate keeps both current (renovate.json).
+env:
+  TERRAFORM_VERSION: 1.17.2
+  TFLINT_VERSION: v0.66.0
+  CONFTEST_IMAGE: openpolicyagent/conftest:v0.71.1@sha256:0e77cdf7c1fcde035f3c579e4aaa6664ee2a8be5777eaa9af9f520cdd02280c0
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+  CHECKOV_IMAGE: bridgecrew/checkov:3.4.5@sha256:122602cf32cc72286155d39f1f234b7b594818f7b8d7fdf490701620e521368b
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.8@sha256:96d4a8c87dbbfb3bdd324f8fdc285fc3df5261e2decc619a4dd7e8ee52bbfd46
+  ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor:1.32.0@sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  terraform:
+    name: Terraform fmt / validate / tflint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform -chdir=terraform fmt -recursive -check -diff
+      - name: terraform validate
+        run: |
+          for stack in bootstrap platform; do
+            echo "::group::validate ${stack}"
+            terraform -chdir="terraform/${stack}" init -backend=false -input=false
+            terraform -chdir="terraform/${stack}" validate
+            echo "::endgroup::"
+          done
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+      - name: tflint
+        working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # plugin download rate limits
+        run: |
+          tflint --config="$GITHUB_WORKSPACE/.tflint.hcl" --init
+          tflint --config="$GITHUB_WORKSPACE/.tflint.hcl" --recursive --format compact
+
+  kubernetes:
+    name: Kubernetes render / schema / policy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Render overlays
+        run: |
+          mkdir -p rendered
+          for env in hoodi mainnet; do
+            kubectl kustomize "k8s/overlays/${env}" > "rendered/${env}.yaml"
+          done
+      - name: Schema validation (kubeconform, strict, incl. CRDs)
+        run: |
+          docker run --rm -v "$PWD/rendered:/rendered:ro" "$KUBECONFORM_IMAGE" \
+            -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /rendered/hoodi.yaml /rendered/mainnet.yaml
+      - name: Policy-as-code (OPA / conftest)
+        run: |
+          for env in hoodi mainnet; do
+            echo "::group::${env}"
+            docker run --rm -v "$PWD:/project" -w /project "$CONFTEST_IMAGE" \
+              test --all-namespaces --policy policies/kubernetes "rendered/${env}.yaml"
+            docker run --rm -v "$PWD:/project" -w /project "$CONFTEST_IMAGE" \
+              test --combine --namespace kubernetes.combined --policy policies/kubernetes "rendered/${env}.yaml"
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rendered-manifests
+          path: rendered/
+          retention-days: 7
+
+  policy-tests:
+    name: Policy unit tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: conftest verify
+        run: docker run --rm -v "$PWD:/project" -w /project "$CONFTEST_IMAGE" verify --policy policies
+
+  checkov:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Render overlays
+        run: |
+          mkdir -p rendered
+          for env in hoodi mainnet; do
+            kubectl kustomize "k8s/overlays/${env}" > "rendered/${env}.yaml"
+          done
+      - name: Checkov (Terraform + rendered Kubernetes)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo "$CHECKOV_IMAGE" \
+            --config-file .checkov.yaml \
+            -d terraform -d rendered \
+            --framework terraform kubernetes \
+            -o cli -o sarif --output-file-path console,checkov.sarif
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always() && hashFiles('checkov.sarif') != ''
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -S warning \
+            scripts/*.sh k8s/base/validator/scripts/*.sh tests/*/run.sh
+
+  workflow-security:
+    name: Workflow security (actionlint + zizmor)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT_IMAGE" -no-color
+      - name: zizmor (template injection, credential persistence, unpinned uses, ...)
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ZIZMOR_IMAGE" --offline .github/workflows
+
+  gateway-tests:
+    name: RPC gateway functional tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash tests/gateway/run.sh
+
+  validator-tests:
+    name: Validator key-path tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash tests/validator/run.sh

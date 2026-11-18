@@ -1,0 +1,39 @@
+# Scales the RPC pool on the CPU of the *geth* container of *ready* (synced)
+# replicas. A replica that is still syncing is unready, so its sync CPU does
+# not feed back into further scale-ups.
+#
+# Scaling is deliberately slow in both directions: a new replica costs a
+# (snapshot-free) sync, and Cluster Autoscaler adds the node it lands on.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: eth-node
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: eth-node
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: geth
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 1800
+    scaleDown:
+      stabilizationWindowSeconds: 3600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 3600

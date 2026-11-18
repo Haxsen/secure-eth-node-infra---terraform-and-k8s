@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rpc-gateway
+
+resources:
+  - serviceaccount.yaml
+  - secretproviderclass.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicies.yaml
+
+# Content-hashed name: any config change rolls the Deployment automatically.
+configMapGenerator:
+  - name: rpc-gateway-config
+    files:
+      - config/nginx.conf
+      - config/rpc_guard.lua

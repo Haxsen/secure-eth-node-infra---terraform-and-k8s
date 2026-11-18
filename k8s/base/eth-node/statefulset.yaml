@@ -1,0 +1,289 @@
+# Execution (geth) + consensus (Lighthouse beacon node) pair.
+#
+# Both clients share one pod so the Engine API (JWT-authenticated, able to
+# drive fork choice) binds to 127.0.0.1 and never touches the pod network.
+#
+# Readiness == "fully synced", so the RPC Service and the validator only ever
+# see in-sync replicas, and the HPA ignores CPU from replicas that are still
+# syncing (unready pods are treated as 0% when scaling up).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: eth-node
+  labels:
+    app.kubernetes.io/name: eth-node
+    app.kubernetes.io/component: execution-consensus
+spec:
+  serviceName: eth-node-headless
+  # replicas intentionally omitted: owned by the HorizontalPodAutoscaler.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  # Scale-down keeps the synced volume; a later scale-up re-attaches it and
+  # only has to catch up a few blocks instead of a full sync.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eth-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eth-node
+        app.kubernetes.io/component: execution-consensus
+      annotations:
+        kubectl.kubernetes.io/default-container: geth
+    spec:
+      serviceAccountName: eth-node
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # geth flushes in-memory state on SIGTERM; killing it early can corrupt the DB.
+      terminationGracePeriodSeconds: 300
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        trust-zone: edge
+      tolerations:
+        - key: trust-zone
+          operator: Equal
+          value: edge
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: eth-node
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: eth-node
+      containers:
+        - name: geth
+          image: ethereum/client-go:v1.17.10@sha256:6b69f2c4fb2d53adce8e39d5ba8f2d9338c6b412caf5a6cf83174911a2403521
+          args:
+            - --$(ETH_NETWORK)
+            - --datadir=/data
+            - --syncmode=snap
+            - --nat=none
+            - --port=30303
+            - --maxpeers=50
+            # --- Public JSON-RPC: read + sendRawTransaction only ---------------
+            - --http
+            - --http.addr=0.0.0.0
+            - --http.port=8545
+            - --http.api=eth,net,web3
+            - --http.vhosts=eth-node-rpc.eth-nodes.svc.cluster.local,localhost
+            # --- Engine API: loopback only, JWT required -----------------------
+            - --authrpc.addr=127.0.0.1
+            - --authrpc.port=8551
+            - --authrpc.vhosts=localhost
+            - --authrpc.jwtsecret=/secrets/jwt/jwt.hex
+            # --- Resource caps against expensive-query DoS ---------------------
+            - --rpc.gascap=50000000
+            - --rpc.evmtimeout=5s
+            - --rpc.txfeecap=1
+            - --rpc.rangelimit=5000
+            - --rpc.logquerylimit=100
+            - --rpc.batch-request-limit=50
+            - --rpc.batch-response-max-size=25000000
+            # --- Observability ---------------------------------------------------
+            - --metrics
+            - --metrics.addr=0.0.0.0
+            - --metrics.port=6060
+          env:
+            - name: ETH_NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-network
+                  key: ETH_NETWORK
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: http-rpc
+              containerPort: 8545
+              protocol: TCP
+            - name: metrics
+              containerPort: 6060
+              protocol: TCP
+            - name: p2p-tcp
+              containerPort: 30303
+              protocol: TCP
+            - name: p2p-udp
+              containerPort: 30303
+              protocol: UDP
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /data/geth.ipc"]
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - '[ "$(geth attach --exec "!eth.syncing && eth.blockNumber > 0" /data/geth.ipc)" = "true" ]'
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["geth", "attach", "--exec", "net.listening", "/data/geth.ipc"]
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: geth-data
+              mountPath: /data
+            - name: jwt
+              mountPath: /secrets/jwt
+              readOnly: true
+            - name: geth-tmp
+              mountPath: /tmp
+
+        - name: lighthouse
+          image: sigp/lighthouse:v8.3.3@sha256:fc97c58322f3b159724a8c3546e2b5275204ab018c23dfb52559356437caa31c
+          command: ["lighthouse"]
+          args:
+            - beacon_node
+            - --network=$(ETH_NETWORK)
+            - --datadir=/data
+            - --execution-endpoint=http://127.0.0.1:8551
+            - --execution-jwt=/secrets/jwt/jwt.hex
+            - --checkpoint-sync-url=$(CHECKPOINT_SYNC_URL)
+            - --disable-upnp
+            - --port=9000
+            - --quic-port=9001
+            # Beacon API: reachable only from the validator namespace (NetworkPolicy).
+            - --http
+            - --http-address=0.0.0.0
+            - --http-port=5052
+            - --metrics
+            - --metrics-address=0.0.0.0
+            - --metrics-port=5054
+          env:
+            - name: ETH_NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-network
+                  key: ETH_NETWORK
+            - name: CHECKPOINT_SYNC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-network
+                  key: CHECKPOINT_SYNC_URL
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: beacon-api
+              containerPort: 5052
+              protocol: TCP
+            - name: cl-metrics
+              containerPort: 5054
+              protocol: TCP
+            - name: cl-p2p-tcp
+              containerPort: 9000
+              protocol: TCP
+            - name: cl-p2p-udp
+              containerPort: 9000
+              protocol: UDP
+            - name: cl-quic
+              containerPort: 9001
+              protocol: UDP
+          startupProbe:
+            exec:
+              command: ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5052"]
+            periodSeconds: 10
+            failureThreshold: 90
+          # /eth/v1/node/health: 200 = synced, 206 = syncing. Only 200 is ready.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - >-
+                  exec 3<>/dev/tcp/127.0.0.1/5052 &&
+                  printf 'GET /eth/v1/node/health HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+                  head -n1 <&3 | grep -q ' 200 '
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5052"]
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: lighthouse-data
+              mountPath: /data
+            - name: jwt
+              mountPath: /secrets/jwt
+              readOnly: true
+            - name: lighthouse-tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: jwt
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: eth-node-jwt
+        - name: geth-tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: lighthouse-tmp
+          emptyDir:
+            sizeLimit: 256Mi
+
+  volumeClaimTemplates:
+    - metadata:
+        name: geth-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: eth-gp3-retain
+        resources:
+          requests:
+            storage: 400Gi
+    - metadata:
+        name: lighthouse-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: eth-gp3-retain
+        resources:
+          requests:
+            storage: 200Gi
